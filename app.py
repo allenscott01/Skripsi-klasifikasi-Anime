@@ -65,8 +65,7 @@ if uploaded_file:
     # Saringan Awal: Cek apakah gambar bergaya anime
     if not is_anime_image(image):
         st.error(
-            '⚠️ **Gambar Terdeteksi Bukan Anime (Non-Anime):** Harap unggah'
-            ' gambar bergaya Anime Art!'
+            '**Gambar Terdeteksi Bukan Anime :'
         )
     else:
         # Proses prediksi PyTorch jika gambar lolos saringan
@@ -77,6 +76,6 @@ if uploaded_file:
             idx = torch.argmax(probs).item()
 
         # Tampilkan hasil
-        st.success('✅ Gambar terverifikasi bergaya anime!')
+        st.success(' Gambar terverifikasi bergaya anime!')
         st.write(f'**Prediksi:** {class_names[idx]}')
         st.write(f'**Keyakinan:** {probs[idx].item() * 100:.2f}%')
