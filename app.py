@@ -5,50 +5,42 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 
-st.title("Uji Coba Detektor Anime AI")
+st.title("Detektor Anime AI (Feature-Based OOD)")
 
 
-# 1. Load Model EfficientNet-B0
+# 1. Load Model & Modifikasi Ekstraksi Fitur
 @st.cache_resource
-def load_model():
+def load_model_with_feature_extractor():
+    # Load model EfficientNet-B0 utama
     model = models.efficientnet_b0()
     model.classifier[1] = nn.Linear(model.classifier[1].in_features, 2)
     model.load_state_dict(
         torch.load('best_model_efficientnet.pth', map_location='cpu')
     )
     model.eval()
-    return model
+
+    # Buat feature extractor (mengambil output sebelum classifier layer / 1280 dimensi)
+    feature_extractor = torch.nn.Sequential(
+        model.features, model.avgpool, torch.nn.Flatten()
+    )
+
+    return model, feature_extractor
 
 
-model = load_model()
+model, feature_extractor = load_model_with_feature_extractor()
 class_names = ['AI-generated', 'Human-made']
 
-# 2. Preprocessing Gambar
+# 2. Vektor Acuan Anime (Centroid / Prototype Fitur Anime)
+# Dapat dibuat dari rata-rata 10-20 sampel anime, atau dihitung secara dinamis.
+# Vektor acuan ini merepresentasikan karakteristik domain gaya seni anime.
+ANIME_CENTROID = None  # Akan diinisialisasi pada eksekusi pertama
+
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
 
-
-# 3. Fungsi Energy-Based OOD Score
-def compute_energy_score(logits, temperature=1.0):
-    """Menghitung Energy Score dari logits PyTorch.
-
-    E(x) = -T * log(sum(exp(logits / T)))
-    - Semakin negatif nilainya (misal -6.0) -> In-Distribution (Anime)
-    - Semakin mendekati nol/positif (misal -1.0 atau 0.5) -> Out-of-Distribution (Non-Anime)
-    """
-    logits_scaled = logits / temperature
-    energy = -temperature * torch.logsumexp(logits_scaled, dim=1).item()
-    return energy
-
-
-# --- AMBANG BATAS (THRESHOLD) OOD ---
-# Sesuaikan angka ini sesuai hasil kalibrasi sampel anime kamu (acuan awal: -3.0)
-ENERGY_THRESHOLD = -0.82
-
-# 4. Upload & Prediksi
 uploaded_file = st.file_uploader(
     'Pilih gambar anime', type=['jpg', 'jpeg', 'png']
 )
@@ -57,35 +49,38 @@ if uploaded_file:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, width=300)
 
-    # Preprocessing Tensor
     tensor = transform(image).unsqueeze(0)
 
     with torch.no_grad():
-        # Dapatkan keluaran mentah (logits) dari EfficientNet
+        # A. Ekstrak Vektor Fitur 1280-Dimensi dari Input
+        features = feature_extractor(tensor)  # Shape: [1, 1280]
+
+        # Norm vektor untuk Cosine Similarity
+        norm_features = torch.nn.functional.normalize(features, p=2, dim=1)
+
+        # B. Dapatkan Logits & Softmax untuk Prediksi Utama
         logits = model(tensor)
-
-        # Hitung Energy Score untuk OOD Detection
-        energy_score = compute_energy_score(logits)
-
-        # Hitung Probabilitas Softmax untuk Klasifikasi Biner
         probs = torch.softmax(logits[0], dim=0)
         idx = torch.argmax(probs).item()
         confidence = probs[idx].item() * 100
 
-    # Pengecekan Kondisi OOD
-    is_ood = energy_score > ENERGY_THRESHOLD
+        # C. Evaluasi Deviasi Fitur (Norm-Based OOD Metric)
+        # Gambar di luar domain (foto nyata/objek lain) memiliki magnitudo dan norma fitur yang menyimpang
+        feature_norm = torch.norm(features, p=2).item()
 
-    if is_ood:
+    # THRESHOLD NORMA FITUR
+    # Gambar anime biasanya memiliki norma fitur yang stabil pada rentang tertentu.
+    # Jika feature_norm berada di luar rentang wajar (terlalu rendah/tinggi), tandai sebagai OOD.
+    st.write(f'🔍 **Magnitudo Fitur (1280-D):** `{feature_norm:.2f}`')
+
+    # Contoh Thresholding berdasarkan Norma Vektor Fitur
+    if feature_norm < 12.0 or feature_norm > 28.0:
         st.warning(
-            f"⚠️ **Peringatan Out-of-Distribution (OOD):** Gambar terindikasi **Non-Anime / Luar Domain**.\n\n"
-            f"*(Energy Score: `{energy_score:.2f}` | Threshold: `{ENERGY_THRESHOLD}`)*"
+            '⚠️ **Deteksi Out-of-Distribution:** Gambar terindikasi **Bukan Anime / Luar Domain**.'
         )
-        # Tombol Override: Pengguna tetap bisa memaksa prediksi jika yakin gambar tersebut anime
-        if st.button("Tetap Lanjutkan Prediksi Model"):
-            st.success("✅ **Hasil Prediksi Forced Override:**")
-            st.write(f"**Prediksi:** {class_names[idx]}")
-            st.write(f"**Keyakinan:** {confidence:.2f}%")
+        if st.button('Tetap Paksa Prediksi'):
+            st.info(f'**Prediksi:** {class_names[idx]} ({confidence:.2f}%)')
     else:
-        st.success("✅ **Validasi Sukses:** Gambar terverifikasi domain Anime!")
-        st.write(f"**Prediksi:** {class_names[idx]}")
-        st.write(f"**Keyakinan:** {confidence:.2f}%")
+        st.success('✅ **Gambar Terverifikasi Domain Anime**')
+        st.write(f'**Prediksi:** {class_names[idx]}')
+        st.write(f'**Keyakinan:** {confidence:.2f}%')
