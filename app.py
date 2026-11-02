@@ -46,7 +46,7 @@ def compute_energy_score(logits, temperature=1.0):
 
 # --- AMBANG BATAS (THRESHOLD) OOD ---
 # Sesuaikan angka ini sesuai hasil kalibrasi sampel anime kamu (acuan awal: -3.0)
-ENERGY_THRESHOLD = -3.0
+ENERGY_THRESHOLD = -0.82
 
 # 4. Upload & Prediksi
 uploaded_file = st.file_uploader(
