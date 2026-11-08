@@ -84,7 +84,7 @@ def predict_and_cam(pil_img):
 # ==========================================
 # 3. ANTARMUKA DASHBOARD
 # ==========================================
-st.title("🛡️ Detektor Forensik Citra AI-Anime")
+st.title(" Detektor Forensik Citra AI-Anime")
 st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()}")
 
 uploaded_file = st.file_uploader("Unggah gambar uji (PNG, JPG, JPEG, WEBP):", type=["jpg", "jpeg", "png", "webp"])
