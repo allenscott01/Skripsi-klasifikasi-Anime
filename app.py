@@ -51,16 +51,10 @@ def predict_and_ig(pil_img, n_steps=25):
         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
         pred_idx = int(np.argmax(probs))
 
-    # 2. Gaussian Blur Baseline (Menghilangkan noise pada background polos)
-    img_np = input_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-    blurred_np = cv2.GaussianBlur(img_np, (21, 21), 0)
-    baseline = (
-        torch.tensor(blurred_np.transpose(2, 0, 1), dtype=torch.float32)
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
+    # 2. Baseline Zeroth Tensor
+    baseline = torch.zeros_like(input_tensor).to(DEVICE)
 
-    # 3. IG Pass DINAMIS mengikuti kelas hasil prediksi (pred_idx)
+    # 3. IG Pass Dinamis mengikuti kelas prediksi
     alphas = torch.linspace(0.0, 1.0, steps=n_steps, device=DEVICE)
     scaled_inputs = torch.cat(
         [baseline + alpha * (input_tensor - baseline) for alpha in alphas],
@@ -79,31 +73,35 @@ def predict_and_ig(pil_img, n_steps=25):
     avg_grads = torch.mean(grads, dim=0, keepdim=True)
     integrated_grads = (input_tensor - baseline) * avg_grads
 
-    # 4. Ambil Atribusi Positif untuk Kelas yang Terdeteksi
+    # 4. Ambil Atribusi Positif & Kalkulasi Magnitudo L2 (Cegah pembatalan warna)
     ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
-    ig_net = np.sum(ig_np, axis=0)  # Agregasi Channel RGB
-    pos_attr = np.maximum(0, ig_net)  # Bukti positif pendorong keputusan
+    pos_ig = np.maximum(0, ig_np)
+    mag = np.linalg.norm(pos_ig, axis=0)  # Shape: [224, 224]
 
-    # Normalisasi terbatas (Mencegah amfifikasi noise saat keyakinan 0%)
-    max_val = np.max(pos_attr)
-    if max_val > 1e-5:
-        attr_norm = pos_attr / max_val
+    # 5. Normalisasi Persentil (Persentil 99 agar kontras menyala terang)
+    p_high = np.percentile(mag, 99)
+    p_low = np.percentile(mag, 10)
+    
+    if p_high > p_low:
+        attr_norm = np.clip((mag - p_low) / (p_high - p_low + 1e-8), 0.0, 1.0)
     else:
-        attr_norm = np.zeros_like(pos_attr)
+        attr_norm = np.zeros_like(mag)
 
-    # 5. Pewarnaan Dinamis Berdasarkan Kelas Terdeteksi
+    # 6. Matriks Warna Mask Dinamis (RGB)
     heatmap_rgb = np.zeros((224, 224, 3), dtype=np.uint8)
+    intensity = np.uint8(255 * attr_norm)
 
     if pred_idx == 0:     # AI-Anime -> Merah (🔴)
-        heatmap_rgb[:, :, 0] = np.uint8(255 * attr_norm)
+        heatmap_rgb[:, :, 0] = intensity
     elif pred_idx == 1:   # Human-Anime -> Biru (🔵)
-        heatmap_rgb[:, :, 2] = np.uint8(255 * attr_norm)
+        heatmap_rgb[:, :, 2] = intensity
     else:                 # Real-Image (OOD) -> Hijau (🟢)
-        heatmap_rgb[:, :, 1] = np.uint8(255 * attr_norm)
+        heatmap_rgb[:, :, 1] = intensity
 
-    # Overlay heatmap ke gambar original
+    # 7. Alpha Blending Dinamis (Hanya menumpuk warna pada piksel aktif)
     orig_array = np.array(img_resized)
-    overlay = cv2.addWeighted(orig_array, 0.6, heatmap_rgb, 0.4, 0)
+    alpha = np.expand_dims(attr_norm * 0.65, axis=-1)  # Maksimal 65% transparansi
+    overlay = (orig_array * (1.0 - alpha) + heatmap_rgb * alpha).astype(np.uint8)
 
     return img_resized, overlay, pred_idx, probs
 
@@ -134,13 +132,13 @@ if uploaded_file:
             caption="Peta Atribusi Dinamis (XAI Integrated Gradients)",
             use_container_width=True,
         )
-        # Legenda Indikator Warna Dinamis
+        # Legenda Indikator Warna
         st.markdown(
             """
         **Keterangan Warna Heatmap (Dinamis):**
-        - 🔴 **Piksel Merah (AI-Anime):** Menunjukkan lokasi artefak mikro generatif VAE / Diffusion.
-        - 🔵 **Piksel Biru (Human-Anime):** Menunjukkan konsistensi stroke *line-art* & *shading* manual.
-        - 🟢 **Piksel Hijau (Real-Image):** Menunjukkan tekstur fotografi dunia nyata (Kontrol OOD).
+        - 🔴 **Piksel Merah (AI-Anime):** Lokasi fitur pendorong artefak mikro VAE / Diffusion.
+        - 🔵 **Piksel Biru (Human-Anime):** Lokasi fitur pendorong stroke *line-art* & *cell-shading* manual.
+        - 🟢 **Piksel Hijau (Real-Image):** Lokasi tekstur fotografi nyata (Kontrol OOD).
         """
         )
 
