@@ -8,11 +8,12 @@ import streamlit as st
 from torchvision import models, transforms
 
 # ==========================================
-# 1. KONFIGURASI & LOAD MODEL
+# 1. KONFIGURASI & LOAD MODEL (BERBASIS 360x360)
 # ==========================================
 st.set_page_config(page_title="Detektor Forensik AI-Anime (IG)", page_icon="🛡️", layout="wide")
 
-MODEL_PATH = "efficientnet_b0_final.pth"
+MODEL_PATH = "efficientnet_b0_360_final.pth"  # Disesuaikan dengan nama file hasil training 360
+IMAGE_SIZE = 360                               # Konfigurasi ukuran resolusi baru
 CLASS_NAMES = ["AI-Anime", "Human-Anime", "Real-Image (OOD)"]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,16 +34,16 @@ def load_model():
 model = load_model()
 
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
 # ==========================================
-# 2. INFERENSI & INTEGRATED GRADIENTS (TERFILTUR)
+# 2. INFERENSI & INTEGRATED GRADIENTS (Dinamis 360x360)
 # ==========================================
 def predict_and_ig(pil_img, n_steps=25):
-    img_resized = pil_img.resize((224, 224))
+    img_resized = pil_img.resize((IMAGE_SIZE, IMAGE_SIZE))
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
     # 1. Prediction Pass
@@ -79,13 +80,12 @@ def predict_and_ig(pil_img, n_steps=25):
     avg_grads = torch.mean(grads, dim=0, keepdim=True)
     integrated_grads = (input_tensor - baseline) * avg_grads
 
-    # 4. Ambil Atribusi Positif & Magnitudo L2 (Mencegah cancellation antar channel)
+    # 4. Ambil Atribusi Positif & Magnitudo L2
     ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
     pos_ig = np.maximum(0, ig_np)
-    mag = np.linalg.norm(pos_ig, axis=0)  # Shape: [224, 224]
+    mag = np.linalg.norm(pos_ig, axis=0)  # Shape: [360, 360]
 
     # 5. Thresholding Persentil Ketat (p_low=80, p_high=99)
-    # Membuang 80% noise atribusi rendah, mengunci fokus pada 20% piksel terkuat
     p_high = np.percentile(mag, 99)
     p_low = np.percentile(mag, 80)
 
@@ -94,8 +94,9 @@ def predict_and_ig(pil_img, n_steps=25):
     else:
         attr_norm = np.zeros_like(mag)
 
-    # 6. Pemetaan Warna Mask Dinamis (RGB)
-    heatmap_rgb = np.zeros((224, 224, 3), dtype=np.uint8)
+    # 6. Pemetaan Warna Mask Dinamis (Mengikuti dimensi IMAGE_SIZE)
+    h, w = attr_norm.shape
+    heatmap_rgb = np.zeros((h, w, 3), dtype=np.uint8)
     intensity = np.uint8(255 * attr_norm)
 
     if pred_idx == 0:     # AI-Anime -> Merah (🔴)
@@ -116,7 +117,7 @@ def predict_and_ig(pil_img, n_steps=25):
 # 3. ANTARMUKA DASHBOARD STREAMLIT
 # ==========================================
 st.title("🛡️ Detektor Forensik Citra AI-Anime (XAI Integrated Gradients)")
-st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()} | XAI: Integrated Gradients (Pixel-Level Attribution)")
+st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()} | Resolusi Input: {IMAGE_SIZE}x{IMAGE_SIZE} | XAI: Integrated Gradients")
 
 uploaded_file = st.file_uploader("Unggah gambar uji (PNG, JPG, JPEG, WEBP):", type=["jpg", "jpeg", "png", "webp"])
 
