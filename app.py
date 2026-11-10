@@ -41,7 +41,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. INFERENSI & INTEGRATED GRADIENTS (IG)
 # ==========================================
-def predict_and_ig_fixed(pil_img, n_steps=25):
+def predict_and_ig(pil_img, n_steps=25):
     img_resized = pil_img.resize((224, 224))
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
@@ -51,7 +51,7 @@ def predict_and_ig_fixed(pil_img, n_steps=25):
         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
         pred_idx = int(np.argmax(probs))
 
-    # 2. Gaussian Blur Baseline
+    # 2. Gaussian Blur Baseline (Menghilangkan noise pada background polos)
     img_np = input_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
     blurred_np = cv2.GaussianBlur(img_np, (21, 21), 0)
     baseline = (
@@ -81,10 +81,10 @@ def predict_and_ig_fixed(pil_img, n_steps=25):
 
     # 4. Ambil Atribusi Positif untuk Kelas yang Terdeteksi
     ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
-    ig_net = np.sum(ig_np, axis=0)  # Agregasi RGB
-    pos_attr = np.maximum(0, ig_net)  # Hanya bukti positif pendorong keputusan
+    ig_net = np.sum(ig_np, axis=0)  # Agregasi Channel RGB
+    pos_attr = np.maximum(0, ig_net)  # Bukti positif pendorong keputusan
 
-    # Normalisasi terbatas (mencegah magnifikasi noise 0.000%)
+    # Normalisasi terbatas (Mencegah amfifikasi noise saat keyakinan 0%)
     max_val = np.max(pos_attr)
     if max_val > 1e-5:
         attr_norm = pos_attr / max_val
@@ -94,20 +94,21 @@ def predict_and_ig_fixed(pil_img, n_steps=25):
     # 5. Pewarnaan Dinamis Berdasarkan Kelas Terdeteksi
     heatmap_rgb = np.zeros((224, 224, 3), dtype=np.uint8)
 
-    if pred_idx == 0:  # AI-Anime -> Merah (🔴)
+    if pred_idx == 0:     # AI-Anime -> Merah (🔴)
         heatmap_rgb[:, :, 0] = np.uint8(255 * attr_norm)
-    elif pred_idx == 1:  # Human-Anime -> Biru (🔵)
+    elif pred_idx == 1:   # Human-Anime -> Biru (🔵)
         heatmap_rgb[:, :, 2] = np.uint8(255 * attr_norm)
-    else:  # Real-Image (OOD) -> Hijau (🟢)
+    else:                 # Real-Image (OOD) -> Hijau (🟢)
         heatmap_rgb[:, :, 1] = np.uint8(255 * attr_norm)
 
-    # Overlay dengan kontras yang seimbang
+    # Overlay heatmap ke gambar original
     orig_array = np.array(img_resized)
     overlay = cv2.addWeighted(orig_array, 0.6, heatmap_rgb, 0.4, 0)
 
     return img_resized, overlay, pred_idx, probs
+
 # ==========================================
-# 3. ANTARMUKA DASHBOARD
+# 3. ANTARMUKA DASHBOARD STREAMLIT
 # ==========================================
 st.title("🛡️ Detektor Forensik Citra AI-Anime (XAI Integrated Gradients)")
 st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()} | XAI: Integrated Gradients (Pixel-Level Attribution)")
@@ -117,8 +118,8 @@ uploaded_file = st.file_uploader("Unggah gambar uji (PNG, JPG, JPEG, WEBP):", ty
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
 
-    with st.spinner("Menganalisis piksel & menghitung Diverging IG..."):
-        orig_img, ig_overlay, pred_idx, probs = predict_and_ig_diverging(img)
+    with st.spinner("Menganalisis piksel & menghitung Integrated Gradients..."):
+        orig_img, ig_overlay, pred_idx, probs = predict_and_ig(img)
 
     col1, col2, col3 = st.columns([1, 1, 1])
 
@@ -130,15 +131,16 @@ if uploaded_file:
     with col2:
         st.image(
             ig_overlay,
-            caption="Diverging Attribution Map (Red vs Blue)",
+            caption="Peta Atribusi Dinamis (XAI Integrated Gradients)",
             use_container_width=True,
         )
-        # Legenda Indikator Warna
+        # Legenda Indikator Warna Dinamis
         st.markdown(
             """
-        **Keterangan Warna Heatmap:**
-        - 🔴 **Piksel Merah:** Jejak Fitur AI (Residu noise VAE / Over-smoothing).
-        - 🔵 **Piksel Biru:** Jejak Fitur Human (Konsistensi stroke line-art / cell-shading).
+        **Keterangan Warna Heatmap (Dinamis):**
+        - 🔴 **Piksel Merah (AI-Anime):** Menunjukkan lokasi artefak mikro generatif VAE / Diffusion.
+        - 🔵 **Piksel Biru (Human-Anime):** Menunjukkan konsistensi stroke *line-art* & *shading* manual.
+        - 🟢 **Piksel Hijau (Real-Image):** Menunjukkan tekstur fotografi dunia nyata (Kontrol OOD).
         """
         )
 
