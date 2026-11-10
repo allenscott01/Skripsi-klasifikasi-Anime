@@ -41,7 +41,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. INFERENSI & INTEGRATED GRADIENTS (IG)
 # ==========================================
-def predict_and_ig(pil_img, n_steps=25):
+def predict_and_ig_diverging(pil_img, n_steps=25):
     img_resized = pil_img.resize((224, 224))
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
@@ -51,8 +51,7 @@ def predict_and_ig(pil_img, n_steps=25):
         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
         pred_idx = int(np.argmax(probs))
 
-    # 2. IMPROVEMENT 1: Gaussian Blur Baseline (Menghapus Atribusi Latar Polos)
-    # Konversi input tensor ke Numpy untuk proses Gaussian Blur
+    # 2. Gaussian Blur Baseline (Mengabaikan background polos)
     img_np = input_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
     blurred_np = cv2.GaussianBlur(img_np, (21, 21), 0)
     baseline = (
@@ -61,7 +60,9 @@ def predict_and_ig(pil_img, n_steps=25):
         .to(DEVICE)
     )
 
-    # 3. Integrated Gradients Pass
+    # 3. IG Pass ditargetkan khusus ke Kelas 0 (AI-Anime)
+    # Ini menjadi acuan baseline komparatif (AI vs Human)
+    target_class = 0
     alphas = torch.linspace(0.0, 1.0, steps=n_steps, device=DEVICE)
     scaled_inputs = torch.cat(
         [baseline + alpha * (input_tensor - baseline) for alpha in alphas],
@@ -70,7 +71,7 @@ def predict_and_ig(pil_img, n_steps=25):
     scaled_inputs.requires_grad_(True)
 
     scaled_outputs = model(scaled_inputs)
-    target_outputs = scaled_outputs[:, pred_idx]
+    target_outputs = scaled_outputs[:, target_class]
 
     model.zero_grad()
     grads = torch.autograd.grad(
@@ -80,22 +81,30 @@ def predict_and_ig(pil_img, n_steps=25):
     avg_grads = torch.mean(grads, dim=0, keepdim=True)
     integrated_grads = (input_tensor - baseline) * avg_grads
 
-    # 4. IMPROVEMENT 2: Positif Attribution Only (Focus pada fitur pendorong)
+    # 4. Agregasi Nilai Atribusi Net (Jumlahkan Channel RGB)
     ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
-    ig_pos = np.maximum(0, ig_np)  # Hapus atribusi negatif
-    ig_heatmap = np.sum(ig_pos, axis=0)  # Agregasi channel RGB
+    ig_net = np.sum(ig_np, axis=0)  # Tensor 2D [224, 224]
 
-    # 5. IMPROVEMENT 3: Percentile Normalization (Eliminasi noise redup)
-    vmax = np.percentile(ig_heatmap, 99)
-    vmin = np.percentile(ig_heatmap, 5)
-    ig_heatmap = np.clip(
-        (ig_heatmap - vmin) / (vmax - vmin + 1e-8), 0.0, 1.0
-    )
+    # 5. Pemisahan Atribusi Positif (AI) & Negatif (Human)
+    pos_attr = np.maximum(0, ig_net)  # Pendorong ke arah AI
+    neg_attr = np.maximum(0, -ig_net)  # Pendorong ke arah Human (Penahan AI)
 
-    # Overlay Heatmap ke Gambar Asli
-    heatmap_cv = cv2.applyColorMap(np.uint8(255 * ig_heatmap), cv2.COLORMAP_JET)
-    heatmap_cv = cv2.cvtColor(heatmap_cv, cv2.COLOR_BGR2RGB)
-    overlay = cv2.addWeighted(np.array(img_resized), 0.5, heatmap_cv, 0.5, 0)
+    # Normalisasi Persentil (Percentile 99) untuk Kontras Tajam
+    vmax_pos = np.percentile(pos_attr, 99) if np.max(pos_attr) > 0 else 1.0
+    vmax_neg = np.percentile(neg_attr, 99) if np.max(neg_attr) > 0 else 1.0
+
+    pos_norm = np.clip(pos_attr / (vmax_pos + 1e-8), 0.0, 1.0)
+    neg_norm = np.clip(neg_attr / (vmax_neg + 1e-8), 0.0, 1.0)
+
+    # 6. Pembuatan Map RGB (R = Merah/AI, B = Biru/Human, G = 0)
+    heatmap_rgb = np.zeros((224, 224, 3), dtype=np.uint8)
+    heatmap_rgb[:, :, 0] = np.uint8(255 * pos_norm)  # Channel Red
+    heatmap_rgb[:, :, 1] = 0  # Channel Green
+    heatmap_rgb[:, :, 2] = np.uint8(255 * neg_norm)  # Channel Blue
+
+    # Overlay ke Gambar Asli
+    orig_array = np.array(img_resized)
+    overlay = cv2.addWeighted(orig_array, 0.55, heatmap_rgb, 0.45, 0)
 
     return img_resized, overlay, pred_idx, probs
 
