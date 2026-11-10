@@ -12,7 +12,7 @@ from torchvision import models, transforms
 # ==========================================
 st.set_page_config(page_title="Detektor Forensik AI-Anime (IG)", page_icon="🛡️", layout="wide")
 
-MODEL_PATH = "efficientnet_b0_360_final.pth"  # Disesuaikan dengan nama file hasil training 360
+MODEL_PATH = "efficientnet_b0_final.pth"  # Disesuaikan dengan nama file hasil training 360
 IMAGE_SIZE = 360                               # Konfigurasi ukuran resolusi baru
 CLASS_NAMES = ["AI-Anime", "Human-Anime", "Real-Image (OOD)"]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
