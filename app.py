@@ -8,12 +8,12 @@ import streamlit as st
 from torchvision import models, transforms
 
 # ==========================================
-# 1. KONFIGURASI & LOAD MODEL (BERBASIS 360x360)
+# 1. KONFIGURASI & LOAD MODEL
 # ==========================================
 st.set_page_config(page_title="Detektor Forensik AI-Anime (IG)", page_icon="🛡️", layout="wide")
 
-MODEL_PATH = "efficientnet_b0_final.pth"  # Disesuaikan dengan nama file hasil training 360
-IMAGE_SIZE = 360                               # Konfigurasi ukuran resolusi baru
+MODEL_PATH = "efficientnet_b0_360_final.pth"
+IMAGE_SIZE = 360
 CLASS_NAMES = ["AI-Anime", "Human-Anime", "Real-Image (OOD)"]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,14 +24,17 @@ def load_model():
     model.classifier[1] = nn.Linear(in_features, len(CLASS_NAMES))
     
     if not os.path.exists(MODEL_PATH):
-        st.error(f"File bobot '{MODEL_PATH}' tidak ditemukan. Silakan jalankan pelatihan terlebih dahulu.")
+        st.error(f"❌ File bobot '{MODEL_PATH}' tidak ditemukan di folder yang sama dengan script ini. Harap letakkan file .pth Anda di folder ini.")
         st.stop()
         
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    try:
+        state_dict = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
+    except TypeError:
+        state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+        
+    model.load_state_dict(state_dict)
     model.to(DEVICE).eval()
     return model
-
-model = load_model()
 
 transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
@@ -40,52 +43,63 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. INFERENSI & INTEGRATED GRADIENTS (Dinamis 360x360)
+# 2. INFERENSI & INTEGRATED GRADIENTS (BUG-FREE)
 # ==========================================
-def predict_and_ig(pil_img, n_steps=25):
+def predict_and_ig(pil_img, n_steps=15, chunk_size=5):
     img_resized = pil_img.resize((IMAGE_SIZE, IMAGE_SIZE))
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
-    # 1. Prediction Pass
+    # 1. Prediction Pass (Menggunakan Mixed Precision FP16 agar hemat VRAM)
     with torch.no_grad():
-        output = model(input_tensor)
-        probs = torch.softmax(output, dim=1)[0].cpu().numpy()
-        pred_idx = int(np.argmax(probs))
+        with torch.amp.autocast('cuda', enabled=(DEVICE.type == 'cuda')):
+            output = model(input_tensor)
+            probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+            pred_idx = int(np.argmax(probs))
 
-    # 2. Gaussian Blur Baseline (Menghilangkan kontribusi background polos/bercorak)
+    # 2. Gaussian Blur Baseline
     img_np = input_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-    blurred_np = cv2.GaussianBlur(img_np, (21, 21), 0)
-    baseline = (
-        torch.tensor(blurred_np.transpose(2, 0, 1), dtype=torch.float32)
-        .unsqueeze(0)
-        .to(DEVICE)
-    )
+    img_np_contiguous = np.ascontiguousarray(img_np)
+    blurred_np = cv2.GaussianBlur(img_np_contiguous, (21, 21), 0)
+    baseline_np = np.ascontiguousarray(blurred_np.transpose(2, 0, 1))
+    baseline = torch.tensor(baseline_np, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-    # 3. IG Pass Dinamis Mengikuti Kelas Hasil Prediksi
+    # 3. IG Pass Ter-Optimasi (Micro-Batching / Chunking)
     alphas = torch.linspace(0.0, 1.0, steps=n_steps, device=DEVICE)
-    scaled_inputs = torch.cat(
-        [baseline + alpha * (input_tensor - baseline) for alpha in alphas],
-        dim=0,
-    )
-    scaled_inputs.requires_grad_(True)
+    total_grads = torch.zeros_like(input_tensor)
 
-    scaled_outputs = model(scaled_inputs)
-    target_outputs = scaled_outputs[:, pred_idx]
+    # Memproses n_steps secara bertahap (chunking) untuk mencegah VRAM Spike
+    for i in range(0, n_steps, chunk_size):
+        batch_alphas = alphas[i:i + chunk_size]
+        scaled_chunk = torch.cat(
+            [baseline + alpha * (input_tensor - baseline) for alpha in batch_alphas],
+            dim=0
+        )
+        scaled_chunk.requires_grad_(True)
 
-    model.zero_grad()
-    grads = torch.autograd.grad(
-        outputs=target_outputs.sum(), inputs=scaled_inputs
-    )[0]
+        with torch.amp.autocast('cuda', enabled=(DEVICE.type == 'cuda')):
+            chunk_outputs = model(scaled_chunk)
+            target_outputs = chunk_outputs[:, pred_idx]
 
-    avg_grads = torch.mean(grads, dim=0, keepdim=True)
+        model.zero_grad()
+        grads = torch.autograd.grad(outputs=target_outputs.sum(), inputs=scaled_chunk)[0]
+        
+        # Akumulasi gradien
+        total_grads += torch.sum(grads, dim=0, keepdim=True)
+
+        # Hapus variabel temporary dari VRAM
+        del scaled_chunk, chunk_outputs, target_outputs, grads
+        if DEVICE.type == 'cuda':
+            torch.cuda.empty_cache()
+
+    avg_grads = total_grads / n_steps
     integrated_grads = (input_tensor - baseline) * avg_grads
 
     # 4. Ambil Atribusi Positif & Magnitudo L2
     ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
     pos_ig = np.maximum(0, ig_np)
-    mag = np.linalg.norm(pos_ig, axis=0)  # Shape: [360, 360]
+    mag = np.linalg.norm(pos_ig, axis=0)
 
-    # 5. Thresholding Persentil Ketat (p_low=80, p_high=99)
+    # 5. Thresholding Persentil
     p_high = np.percentile(mag, 99)
     p_low = np.percentile(mag, 80)
 
@@ -94,28 +108,29 @@ def predict_and_ig(pil_img, n_steps=25):
     else:
         attr_norm = np.zeros_like(mag)
 
-    # 6. Pemetaan Warna Mask Dinamis (Mengikuti dimensi IMAGE_SIZE)
+    # 6. Pemetaan Warna Mask Dinamis
     h, w = attr_norm.shape
     heatmap_rgb = np.zeros((h, w, 3), dtype=np.uint8)
     intensity = np.uint8(255 * attr_norm)
 
-    if pred_idx == 0:     # AI-Anime -> Merah (🔴)
+    if pred_idx == 0:     # AI-Anime -> Merah
         heatmap_rgb[:, :, 0] = intensity
-    elif pred_idx == 1:   # Human-Anime -> Biru (🔵)
+    elif pred_idx == 1:   # Human-Anime -> Biru
         heatmap_rgb[:, :, 2] = intensity
-    else:                 # Real-Image (OOD) -> Hijau (🟢)
+    else:                 # Real-Image -> Hijau
         heatmap_rgb[:, :, 1] = intensity
 
-    # 7. Alpha Blending Dinamis (Masking presisi hanya pada piksel aktif)
+    # 7. Alpha Blending
     orig_array = np.array(img_resized)
     alpha = np.expand_dims(attr_norm * 0.75, axis=-1)
     overlay = (orig_array * (1.0 - alpha) + heatmap_rgb * alpha).astype(np.uint8)
 
     return img_resized, overlay, pred_idx, probs
+# ==========================================
+# 3. DASHBOARD STREAMLIT
+# ==========================================
+model = load_model()
 
-# ==========================================
-# 3. ANTARMUKA DASHBOARD STREAMLIT
-# ==========================================
 st.title("🛡️ Detektor Forensik Citra AI-Anime (XAI Integrated Gradients)")
 st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()} | Resolusi Input: {IMAGE_SIZE}x{IMAGE_SIZE} | XAI: Integrated Gradients")
 
@@ -130,24 +145,17 @@ if uploaded_file:
     col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
-        st.image(
-            orig_img, caption="Gambar Input Original", use_container_width=True
-        )
+        st.image(orig_img, caption="Gambar Input Original", use_container_width=True)
 
     with col2:
-        st.image(
-            ig_overlay,
-            caption="Peta Atribusi Terfokus (Top 20% Fitur Dominan)",
-            use_container_width=True,
-        )
-        # Legenda Indikator Warna
+        st.image(ig_overlay, caption="Peta Atribusi Terfokus (Top 20% Fitur Dominan)", use_container_width=True)
         st.markdown(
             """
-        **Keterangan Warna Heatmap (Dinamis):**
-        - 🔴 **Piksel Merah (AI-Anime):** Fitur utama artefak mikro VAE / Diffusion.
-        - 🔵 **Piksel Biru (Human-Anime):** Fitur utama stroke *line-art* & anatomi manual.
-        - 🟢 **Piksel Hijau (Real-Image):** Fitur utama tekstur fotografi nyata (Kontrol OOD).
-        """
+            **Keterangan Warna Heatmap (Dinamis):**
+            - 🔴 **Piksel Merah (AI-Anime):** Fitur utama artefak mikro VAE / Diffusion.
+            - 🔵 **Piksel Biru (Human-Anime):** Fitur utama stroke *line-art* & anatomi manual.
+            - 🟢 **Piksel Hijau (Real-Image):** Fitur utama tekstur fotografi nyata (Kontrol OOD).
+            """
         )
 
     with col3:
