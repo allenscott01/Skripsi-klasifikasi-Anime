@@ -51,34 +51,48 @@ def predict_and_ig(pil_img, n_steps=25):
         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
         pred_idx = int(np.argmax(probs))
 
-    # 2. Integrated Gradients Pass
-    baseline = torch.zeros_like(input_tensor).to(DEVICE)
+    # 2. IMPROVEMENT 1: Gaussian Blur Baseline (Menghapus Atribusi Latar Polos)
+    # Konversi input tensor ke Numpy untuk proses Gaussian Blur
+    img_np = input_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+    blurred_np = cv2.GaussianBlur(img_np, (21, 21), 0)
+    baseline = (
+        torch.tensor(blurred_np.transpose(2, 0, 1), dtype=torch.float32)
+        .unsqueeze(0)
+        .to(DEVICE)
+    )
+
+    # 3. Integrated Gradients Pass
     alphas = torch.linspace(0.0, 1.0, steps=n_steps, device=DEVICE)
-    
-    # Skala masukan linier dari baseline (hitam) ke input original
-    scaled_inputs = torch.cat([baseline + alpha * (input_tensor - baseline) for alpha in alphas], dim=0)
+    scaled_inputs = torch.cat(
+        [baseline + alpha * (input_tensor - baseline) for alpha in alphas],
+        dim=0,
+    )
     scaled_inputs.requires_grad_(True)
-    
-    # Forward pass untuk seluruh step
+
     scaled_outputs = model(scaled_inputs)
     target_outputs = scaled_outputs[:, pred_idx]
-    
-    # Backward pass untuk kalkulasi gradient piksel
+
     model.zero_grad()
-    grads = torch.autograd.grad(outputs=target_outputs.sum(), inputs=scaled_inputs)[0]
-    
-    # Rata-rata gradient sepanjang lintasan (Riemann Sum)
+    grads = torch.autograd.grad(
+        outputs=target_outputs.sum(), inputs=scaled_inputs
+    )[0]
+
     avg_grads = torch.mean(grads, dim=0, keepdim=True)
     integrated_grads = (input_tensor - baseline) * avg_grads
-    
-    # Ekstraksi atribusi & agregasi channel (magnitudo absolut piksel)
-    ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
-    ig_heatmap = np.max(np.abs(ig_np), axis=0)
-    
-    # Normalisasi heatmap ke skala 0 - 1
-    ig_heatmap = (ig_heatmap - np.min(ig_heatmap)) / (np.max(ig_heatmap) - np.min(ig_heatmap) + 1e-8)
 
-    # Overlay heatmap ke gambar asli (Colormap JET)
+    # 4. IMPROVEMENT 2: Positif Attribution Only (Focus pada fitur pendorong)
+    ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
+    ig_pos = np.maximum(0, ig_np)  # Hapus atribusi negatif
+    ig_heatmap = np.sum(ig_pos, axis=0)  # Agregasi channel RGB
+
+    # 5. IMPROVEMENT 3: Percentile Normalization (Eliminasi noise redup)
+    vmax = np.percentile(ig_heatmap, 99)
+    vmin = np.percentile(ig_heatmap, 5)
+    ig_heatmap = np.clip(
+        (ig_heatmap - vmin) / (vmax - vmin + 1e-8), 0.0, 1.0
+    )
+
+    # Overlay Heatmap ke Gambar Asli
     heatmap_cv = cv2.applyColorMap(np.uint8(255 * ig_heatmap), cv2.COLORMAP_JET)
     heatmap_cv = cv2.cvtColor(heatmap_cv, cv2.COLOR_BGR2RGB)
     overlay = cv2.addWeighted(np.array(img_resized), 0.5, heatmap_cv, 0.5, 0)
