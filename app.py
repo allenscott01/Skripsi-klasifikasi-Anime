@@ -10,7 +10,7 @@ from torchvision import models, transforms
 # ==========================================
 # 1. KONFIGURASI & LOAD MODEL
 # ==========================================
-st.set_page_config(page_title="Detektor Forensik AI-Anime", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Detektor Forensik AI-Anime (IG)", page_icon="🛡️", layout="wide")
 
 MODEL_PATH = "efficientnet_b0_final.pth"
 CLASS_NAMES = ["AI-Anime", "Human-Anime", "Real-Image (OOD)"]
@@ -39,70 +39,76 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 2. INFERENSI & GRAD-CAM
+# 2. INFERENSI & INTEGRATED GRADIENTS (IG)
 # ==========================================
-def predict_and_cam(pil_img):
+def predict_and_ig(pil_img, n_steps=25):
     img_resized = pil_img.resize((224, 224))
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
-    activations, gradients = [], []
-    def hook_act(module, input, output): activations.append(output)
-    def hook_grad(module, grad_in, grad_out): gradients.append(grad_out[0])
+    # 1. Prediction Pass
+    with torch.no_grad():
+        output = model(input_tensor)
+        probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+        pred_idx = int(np.argmax(probs))
 
-    target_layer = model.features[-1]
-    h1 = target_layer.register_forward_hook(hook_act)
-    h2 = target_layer.register_full_backward_hook(hook_grad)
-
-    output = model(input_tensor)
-    probs = torch.softmax(output, dim=1)[0].detach().cpu().numpy()
-    pred_idx = int(np.argmax(probs))
-
+    # 2. Integrated Gradients Pass
+    baseline = torch.zeros_like(input_tensor).to(DEVICE)
+    alphas = torch.linspace(0.0, 1.0, steps=n_steps, device=DEVICE)
+    
+    # Skala masukan linier dari baseline (hitam) ke input original
+    scaled_inputs = torch.cat([baseline + alpha * (input_tensor - baseline) for alpha in alphas], dim=0)
+    scaled_inputs.requires_grad_(True)
+    
+    # Forward pass untuk seluruh step
+    scaled_outputs = model(scaled_inputs)
+    target_outputs = scaled_outputs[:, pred_idx]
+    
+    # Backward pass untuk kalkulasi gradient piksel
     model.zero_grad()
-    output[0, pred_idx].backward()
+    grads = torch.autograd.grad(outputs=target_outputs.sum(), inputs=scaled_inputs)[0]
+    
+    # Rata-rata gradient sepanjang lintasan (Riemann Sum)
+    avg_grads = torch.mean(grads, dim=0, keepdim=True)
+    integrated_grads = (input_tensor - baseline) * avg_grads
+    
+    # Ekstraksi atribusi & agregasi channel (magnitudo absolut piksel)
+    ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
+    ig_heatmap = np.max(np.abs(ig_np), axis=0)
+    
+    # Normalisasi heatmap ke skala 0 - 1
+    ig_heatmap = (ig_heatmap - np.min(ig_heatmap)) / (np.max(ig_heatmap) - np.min(ig_heatmap) + 1e-8)
 
-    h1.remove()
-    h2.remove()
-
-    grads = gradients[0][0].cpu().data.numpy()
-    acts = activations[0][0].cpu().data.numpy()
-    weights = np.mean(grads, axis=(1, 2))
-
-    cam = np.zeros(acts.shape[1:], dtype=np.float32)
-    for i, w in enumerate(weights):
-        cam += w * acts[i]
-
-    cam = np.maximum(cam, 0)
-    cam = cv2.resize(cam, (224, 224))
-    cam = (cam - np.min(cam)) / (np.max(cam) - np.min(cam) + 1e-8)
-
-    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-    overlay = cv2.addWeighted(np.array(img_resized), 0.6, heatmap, 0.4, 0)
+    # Overlay heatmap ke gambar asli (Colormap JET)
+    heatmap_cv = cv2.applyColorMap(np.uint8(255 * ig_heatmap), cv2.COLORMAP_JET)
+    heatmap_cv = cv2.cvtColor(heatmap_cv, cv2.COLOR_BGR2RGB)
+    overlay = cv2.addWeighted(np.array(img_resized), 0.5, heatmap_cv, 0.5, 0)
 
     return img_resized, overlay, pred_idx, probs
 
 # ==========================================
 # 3. ANTARMUKA DASHBOARD
 # ==========================================
-st.title(" Detektor Forensik Citra AI-Anime")
-st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()}")
+st.title("🛡️ Detektor Forensik Citra AI-Anime (XAI Integrated Gradients)")
+st.caption(f"Perangkat Komputasi Aktif: {DEVICE.type.upper()} | XAI: Integrated Gradients (Pixel-Level Attribution)")
 
 uploaded_file = st.file_uploader("Unggah gambar uji (PNG, JPG, JPEG, WEBP):", type=["jpg", "jpeg", "png", "webp"])
 
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
-    orig_img, cam_overlay, pred_idx, probs = predict_and_cam(img)
+    
+    with st.spinner("Menganalisis piksel & menghitung Integrated Gradients..."):
+        orig_img, ig_overlay, pred_idx, probs = predict_and_ig(img)
 
     col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
-        st.image(orig_img, caption="Gambar Input", use_container_width=True)
+        st.image(orig_img, caption="Gambar Input Original", use_container_width=True)
 
     with col2:
-        st.image(cam_overlay, caption="Heatmap Grad-CAM", use_container_width=True)
+        st.image(ig_overlay, caption="Peta Atribusi Piksel (Integrated Gradients)", use_container_width=True)
 
     with col3:
-        st.subheader("Hasil Analisis")
+        st.subheader("Hasil Analisis Forensik")
         st.metric("Kategori Terdeteksi", CLASS_NAMES[pred_idx], f"{probs[pred_idx]*100:.2f}% Confidence")
         st.divider()
         
