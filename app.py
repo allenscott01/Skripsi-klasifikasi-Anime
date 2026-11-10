@@ -41,7 +41,7 @@ transform = transforms.Compose([
 # ==========================================
 # 2. INFERENSI & INTEGRATED GRADIENTS (IG)
 # ==========================================
-def predict_and_ig_diverging(pil_img, n_steps=25):
+def predict_and_ig_fixed(pil_img, n_steps=25):
     img_resized = pil_img.resize((224, 224))
     input_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
@@ -51,7 +51,7 @@ def predict_and_ig_diverging(pil_img, n_steps=25):
         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
         pred_idx = int(np.argmax(probs))
 
-    # 2. Gaussian Blur Baseline (Mengabaikan background polos)
+    # 2. Gaussian Blur Baseline
     img_np = input_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
     blurred_np = cv2.GaussianBlur(img_np, (21, 21), 0)
     baseline = (
@@ -60,9 +60,7 @@ def predict_and_ig_diverging(pil_img, n_steps=25):
         .to(DEVICE)
     )
 
-    # 3. IG Pass ditargetkan khusus ke Kelas 0 (AI-Anime)
-    # Ini menjadi acuan baseline komparatif (AI vs Human)
-    target_class = 0
+    # 3. IG Pass DINAMIS mengikuti kelas hasil prediksi (pred_idx)
     alphas = torch.linspace(0.0, 1.0, steps=n_steps, device=DEVICE)
     scaled_inputs = torch.cat(
         [baseline + alpha * (input_tensor - baseline) for alpha in alphas],
@@ -71,7 +69,7 @@ def predict_and_ig_diverging(pil_img, n_steps=25):
     scaled_inputs.requires_grad_(True)
 
     scaled_outputs = model(scaled_inputs)
-    target_outputs = scaled_outputs[:, target_class]
+    target_outputs = scaled_outputs[:, pred_idx]
 
     model.zero_grad()
     grads = torch.autograd.grad(
@@ -81,33 +79,33 @@ def predict_and_ig_diverging(pil_img, n_steps=25):
     avg_grads = torch.mean(grads, dim=0, keepdim=True)
     integrated_grads = (input_tensor - baseline) * avg_grads
 
-    # 4. Agregasi Nilai Atribusi Net (Jumlahkan Channel RGB)
+    # 4. Ambil Atribusi Positif untuk Kelas yang Terdeteksi
     ig_np = integrated_grads.squeeze(0).cpu().detach().numpy()
-    ig_net = np.sum(ig_np, axis=0)  # Tensor 2D [224, 224]
+    ig_net = np.sum(ig_np, axis=0)  # Agregasi RGB
+    pos_attr = np.maximum(0, ig_net)  # Hanya bukti positif pendorong keputusan
 
-    # 5. Pemisahan Atribusi Positif (AI) & Negatif (Human)
-    pos_attr = np.maximum(0, ig_net)  # Pendorong ke arah AI
-    neg_attr = np.maximum(0, -ig_net)  # Pendorong ke arah Human (Penahan AI)
+    # Normalisasi terbatas (mencegah magnifikasi noise 0.000%)
+    max_val = np.max(pos_attr)
+    if max_val > 1e-5:
+        attr_norm = pos_attr / max_val
+    else:
+        attr_norm = np.zeros_like(pos_attr)
 
-    # Normalisasi Persentil (Percentile 99) untuk Kontras Tajam
-    vmax_pos = np.percentile(pos_attr, 99) if np.max(pos_attr) > 0 else 1.0
-    vmax_neg = np.percentile(neg_attr, 99) if np.max(neg_attr) > 0 else 1.0
-
-    pos_norm = np.clip(pos_attr / (vmax_pos + 1e-8), 0.0, 1.0)
-    neg_norm = np.clip(neg_attr / (vmax_neg + 1e-8), 0.0, 1.0)
-
-    # 6. Pembuatan Map RGB (R = Merah/AI, B = Biru/Human, G = 0)
+    # 5. Pewarnaan Dinamis Berdasarkan Kelas Terdeteksi
     heatmap_rgb = np.zeros((224, 224, 3), dtype=np.uint8)
-    heatmap_rgb[:, :, 0] = np.uint8(255 * pos_norm)  # Channel Red
-    heatmap_rgb[:, :, 1] = 0  # Channel Green
-    heatmap_rgb[:, :, 2] = np.uint8(255 * neg_norm)  # Channel Blue
 
-    # Overlay ke Gambar Asli
+    if pred_idx == 0:  # AI-Anime -> Merah (🔴)
+        heatmap_rgb[:, :, 0] = np.uint8(255 * attr_norm)
+    elif pred_idx == 1:  # Human-Anime -> Biru (🔵)
+        heatmap_rgb[:, :, 2] = np.uint8(255 * attr_norm)
+    else:  # Real-Image (OOD) -> Hijau (🟢)
+        heatmap_rgb[:, :, 1] = np.uint8(255 * attr_norm)
+
+    # Overlay dengan kontras yang seimbang
     orig_array = np.array(img_resized)
-    overlay = cv2.addWeighted(orig_array, 0.55, heatmap_rgb, 0.45, 0)
+    overlay = cv2.addWeighted(orig_array, 0.6, heatmap_rgb, 0.4, 0)
 
     return img_resized, overlay, pred_idx, probs
-
 # ==========================================
 # 3. ANTARMUKA DASHBOARD
 # ==========================================
