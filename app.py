@@ -118,23 +118,41 @@ uploaded_file = st.file_uploader("Unggah gambar uji (PNG, JPG, JPEG, WEBP):", ty
 
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
-    
-    with st.spinner("Menganalisis piksel & menghitung Integrated Gradients..."):
-        orig_img, ig_overlay, pred_idx, probs = predict_and_ig(img)
+
+    with st.spinner("Menganalisis piksel & menghitung Diverging IG..."):
+        orig_img, ig_overlay, pred_idx, probs = predict_and_ig_diverging(img)
 
     col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
-        st.image(orig_img, caption="Gambar Input Original", use_container_width=True)
+        st.image(
+            orig_img, caption="Gambar Input Original", use_container_width=True
+        )
 
     with col2:
-        st.image(ig_overlay, caption="Peta Atribusi Piksel (Integrated Gradients)", use_container_width=True)
+        st.image(
+            ig_overlay,
+            caption="Diverging Attribution Map (Red vs Blue)",
+            use_container_width=True,
+        )
+        # Legenda Indikator Warna
+        st.markdown(
+            """
+        **Keterangan Warna Heatmap:**
+        - 🔴 **Piksel Merah:** Jejak Fitur AI (Residu noise VAE / Over-smoothing).
+        - 🔵 **Piksel Biru:** Jejak Fitur Human (Konsistensi stroke line-art / cell-shading).
+        """
+        )
 
     with col3:
         st.subheader("Hasil Analisis Forensik")
-        st.metric("Kategori Terdeteksi", CLASS_NAMES[pred_idx], f"{probs[pred_idx]*100:.2f}% Confidence")
+        st.metric(
+            "Kategori Terdeteksi",
+            CLASS_NAMES[pred_idx],
+            f"{probs[pred_idx]*100:.2f}% Confidence",
+        )
         st.divider()
-        
+
         for i, name in enumerate(CLASS_NAMES):
             st.write(f"**{name}**: {probs[i]*100:.2f}%")
             st.progress(float(probs[i]))
